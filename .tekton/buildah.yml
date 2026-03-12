@@ -1,0 +1,90 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: buildah
+  annotations:
+    io.kubernetes.cri-o.userns-mode: "auto:size=65536;map-to-root=true"
+    io.openshift.builder: "true"
+spec:
+  description: Buildah task builds source into a container image and then pushes it to a container registry.
+  params:
+    - name: IMAGE
+      description: Reference of the image buildah will produce.
+    - name: BUILDER_IMAGE
+      description: The location of the buildah builder image.
+      default: registry.redhat.io/rhel8/buildah
+    - name: STORAGE_DRIVER
+      description: Set buildah storage driver
+      default: vfs
+    - name: DOCKERFILE
+      description: Path to the Dockerfile to build.
+      default: ./Dockerfile
+    - name: CONTEXT
+      description: Path to the directory to use as context.
+      default: .
+    - name: TLSVERIFY
+      description: Verify TLS on the registry endpoint
+      default: "true"
+    - name: FORMAT
+      description: The format of the built container, oci or docker
+      default: "oci"
+    - name: BUILD_EXTRA_ARGS
+      description: Extra parameters passed for the build command
+      type: string
+      default: ""
+    - name: PUSH_EXTRA_ARGS
+      description: Extra parameters passed for the push command
+      type: string
+      default: ""
+  workspaces:
+    - name: source
+  results:
+    - name: IMAGE_DIGEST
+      description: Digest of the image just built.
+  stepTemplate:
+    image: $(params.BUILDER_IMAGE)
+    workingDir: $(workspaces.source.path)
+    env:
+      - name: HOME
+        value: /tekton/home
+    securityContext:
+      capabilities:
+        add:
+          - SETFCAP
+      runAsNonRoot: true
+      runAsUser: 1000
+  steps:
+    - name: build
+      script: |
+        buildah --storage-driver=$(params.STORAGE_DRIVER) bud \
+          $(params.BUILD_EXTRA_ARGS) \
+          --format=$(params.FORMAT) \
+          --tls-verify=$(params.TLSVERIFY) \
+          --no-cache \
+          -f $(params.DOCKERFILE) \
+          -t $(params.IMAGE) \
+          $(params.CONTEXT)
+      volumeMounts:
+        - name: varlibcontainers
+          mountPath: /var/lib/containers
+
+    - name: push
+      script: |
+        buildah --storage-driver=$(params.STORAGE_DRIVER) push \
+          $(params.PUSH_EXTRA_ARGS) \
+          --tls-verify=$(params.TLSVERIFY) \
+          --digestfile $(workspaces.source.path)/image-digest \
+          $(params.IMAGE) \
+          docker://$(params.IMAGE)
+      volumeMounts:
+        - name: varlibcontainers
+          mountPath: /var/lib/containers
+
+    - name: digest-to-results
+      image: $(params.BUILDER_IMAGE)
+      script: |
+        cat $(workspaces.source.path)/image-digest | tee /tekton/results/IMAGE_DIGEST
+
+  volumes:
+    - name: varlibcontainers
+      emptyDir: {}
